@@ -131,11 +131,15 @@ int main(int argc, char **argv)
 	struct segment data_seg;
 	struct segment dynamic_seg;
 
+	struct section interp = {0};
 	struct section pltrel = {0};
 	struct section plt = {0};
 	struct section gotplt = {0};
 	struct section dynstr = {0};
 	struct section dynsym = {0};
+	struct section reladyn = {0};
+	struct section init_array = {0};
+	struct section fini_array = {0};
 
 	Elf64_Ehdr *ehdr;
 	Elf64_Phdr *phdr;
@@ -181,6 +185,11 @@ int main(int argc, char **argv)
 
 	/* Locate data segment */
 	for (int i = 0; i < ehdr->e_phnum; i++) {
+		if (phdr[i].p_type == PT_INTERP) {
+			interp.shdr.sh_addr = phdr[i].p_vaddr;
+			interp.shdr.sh_offset = phdr[i].p_offset;
+			interp.shdr.sh_size = phdr[i].p_filesz;
+		}
 		if (phdr[i].p_type == PT_LOAD && phdr[i].p_flags == (PF_R | PF_W)) {
 			printf("[+] Data segment at 0x%x\n", phdr[i].p_vaddr);
 			data_seg.buf = calloc(phdr[i].p_memsz, 1);
@@ -212,21 +221,11 @@ int main(int argc, char **argv)
 	dynamic = (Elf64_Dyn *)dynamic_seg.buf;
 	for (int i = 0; dynamic[i].d_tag != DT_NULL; i++) {
 		switch (dynamic[i].d_tag) {
-		case DT_PLTGOT:
-			printf("[+] Found GOT at 0x%x\n", dynamic[i].d_un.d_ptr);
-			gotplt.shdr.sh_addr = dynamic[i].d_un.d_ptr;
-			gotplt.shdr.sh_offset = dynamic[i].d_un.d_ptr;
-			/* TODO check if GOT lives in the data segment */
-			gotplt.buf = &data_seg.buf[gotplt.shdr.sh_addr - data_seg.base];
-			break;
-		case DT_SYMTAB:
-			dynsym.shdr.sh_addr = dynamic[i].d_un.d_ptr;
-			dynsym.shdr.sh_offset = dynsym.shdr.sh_addr - text_seg.base;
-			printf("Found dynsym at 0x%x\n", dynsym.shdr.sh_addr);
-			break;
-		case DT_SYMENT:
-			dynsym.shdr.sh_size = dynamic[i].d_un.d_val;
-			printf("Found syment: 0x%x\n", dynsym.shdr.sh_size);
+		/*
+		 * == Mandatory Tags ==
+		 */
+		case DT_HASH:
+			/* TODO */
 			break;
 		case DT_STRTAB:
 			dynstr.shdr.sh_addr = dynamic[i].d_un.d_ptr;
@@ -234,10 +233,50 @@ int main(int argc, char **argv)
 			dynstr.buf = &text_seg.buf[dynstr.shdr.sh_offset];
 			printf("Found dynstr at 0x%x\n", dynstr.shdr.sh_addr);
 			break;
+		case DT_SYMTAB:
+			dynsym.shdr.sh_addr = dynamic[i].d_un.d_ptr;
+			dynsym.shdr.sh_offset = dynsym.shdr.sh_addr - text_seg.base;
+			printf("Found dynsym at 0x%x\n", dynsym.shdr.sh_addr);
+			break;
+		case DT_RELA: /* .rela.dyn */
+			reladyn.shdr.sh_addr = dynamic[i].d_un.d_ptr;
+			reladyn.shdr.sh_offset = reladyn.shdr.sh_addr - text_seg.base;
+			printf("Found RELA at 0x%x\n", reladyn.shdr.sh_addr);
+			break;
+		case DT_RELASZ:
+			reladyn.shdr.sh_size = dynamic[i].d_un.d_val;
+		case DT_RELAENT:
+			reladyn.shdr.sh_entsize = dynamic[i].d_un.d_val;
+			break;
+		case DT_STRSZ:
+			dynstr.shdr.sh_size = dynamic[i].d_un.d_ptr;
+			break;
+		case DT_SYMENT:
+			dynsym.shdr.sh_entsize = dynamic[i].d_un.d_val;
+			printf("Found syment: 0x%x\n", dynsym.shdr.sh_entsize);
+			break;
+		case DT_REL:
+		case DT_RELSZ:
+		case DT_RELENT:
+			/* TODO */
+			break;
+		/*
+		 * == Optional Tags ==
+		 */
+		case DT_PLTGOT:
+			printf("[+] Found GOT at 0x%x\n", dynamic[i].d_un.d_ptr);
+			gotplt.shdr.sh_addr = dynamic[i].d_un.d_ptr;
+			gotplt.shdr.sh_offset = dynamic[i].d_un.d_ptr - data_seg.base;
+			/* TODO check if GOT lives in the data segment */
+			gotplt.buf = &data_seg.buf[gotplt.shdr.sh_addr - data_seg.base];
+			break;
+		case DT_PLTRELSZ:
+			pltrel.shdr.sh_size = dynamic[i].d_un.d_ptr;
+			break;
 		case DT_JMPREL:
 			pltrel.shdr.sh_addr = dynamic[i].d_un.d_ptr;
 			pltrel.shdr.sh_offset = pltrel.shdr.sh_addr - text_seg.base;
-			printf("JMPREL at: 0x%x\n", dynamic[i].d_un.d_ptr);
+			printf("[+] Found JMPREL at: 0x%x\n", dynamic[i].d_un.d_ptr);
 			break;
 		case DT_PLTREL:
 			if (dynamic[i].d_un.d_val == DT_REL) {
@@ -248,12 +287,19 @@ int main(int argc, char **argv)
 				printf("PLTREL type: DT_RELA\n");
 			}
 			break;
-		case DT_PLTRELSZ:
-			pltrel.shdr.sh_size = dynamic[i].d_un.d_ptr;
-			printf("PLTRELSZ = %d\n", dynamic[i].d_un.d_val);
+		case DT_INIT_ARRAY:
+			init_array.shdr.sh_addr = dynamic[i].d_un.d_ptr;
+			init_array.shdr.sh_offset = dynamic[i].d_un.d_ptr - data_seg.base;
 			break;
-		case DT_STRSZ:
-			dynstr.shdr.sh_size = dynamic[i].d_un.d_ptr;
+		case DT_INIT_ARRAYSZ:
+			init_array.shdr.sh_size = dynamic[i].d_un.d_val;
+			break;
+		case DT_FINI_ARRAY:
+			fini_array.shdr.sh_addr = dynamic[i].d_un.d_ptr;
+			fini_array.shdr.sh_offset = fini_array.shdr.sh_addr - data_seg.base;
+			break;
+		case DT_FINI_ARRAYSZ:
+			fini_array.shdr.sh_size = dynamic[i].d_un.d_val;
 			break;
 		}
 	}
@@ -267,6 +313,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Scan text segment for PLT-0 */
+	printf("[+] Looking for PLT-0\n");
 	uint8_t *ptr = text_seg.buf;
 	while (ptr <= text_seg.buf + text_seg.len) {
 		/* x86_64 PLT-0 signature:
@@ -286,6 +333,7 @@ int main(int argc, char **argv)
 			printf("[+] Found PLT at 0x%08x\n", vaddr);
 			plt.buf = ptr;
 			plt.shdr.sh_addr = vaddr;
+			plt.shdr.sh_offset = vaddr - text_seg.base;
 		}
 		ptr++;
 	}
@@ -296,6 +344,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Restore GOT entries */
+	printf("[+] Restoring GOT\n");
 	*((uint64_t *)gotplt.buf + 1) = 0;	/* GOT[1] set to zero */
 	*((uint64_t *)gotplt.buf + 2) = 0;	/* GOT[2] set to zero */
 	for (int i = 0; i < pltrel.shdr.sh_size / sizeof(Elf64_Rela); i++) {
@@ -328,6 +377,160 @@ int main(int argc, char **argv)
 
 	f = fopen(fname, "w");
 
+	/* TODO: Reconstruct  section header table */
+	uint8_t shstrtab[] = "\0.interp\0.dynsym\0.dynstr\0.rela.dyn\0.rela.plt\0.plt\0.init_array\0.fini_array\0.dynamic\0.got.plt\0.shstrtab\0";
+
+	Elf64_Shdr shdr[12];
+
+	/* NULL */
+	shdr[0].sh_name = 0;
+	shdr[0].sh_type = SHT_NULL;
+	shdr[0].sh_flags = 0;
+	shdr[0].sh_addr = 0;
+	shdr[0].sh_offset = 0;
+	shdr[0].sh_size = 0;
+	shdr[0].sh_link = 0;
+	shdr[0].sh_info = 0;
+	shdr[0].sh_addralign = 0;
+	shdr[0].sh_entsize = 0;
+
+	/* .interp */
+	shdr[1].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".interp\0", 8) - shstrtab;
+	shdr[1].sh_type = SHT_PROGBITS;
+	shdr[1].sh_flags = SHF_ALLOC;
+	shdr[1].sh_addr = interp.shdr.sh_addr;
+	shdr[1].sh_offset = interp.shdr.sh_offset;
+	shdr[1].sh_size = interp.shdr.sh_size;
+	shdr[1].sh_link = 0;
+	shdr[1].sh_info = 0;
+	shdr[1].sh_addralign = 1;
+	shdr[1].sh_entsize = 0;
+
+	/* .shstrtab */
+	shdr[2].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".shstrtab\0", 10) - shstrtab;;
+	shdr[2].sh_type = SHT_STRTAB;
+	shdr[2].sh_flags = 0;
+	shdr[2].sh_addr = 0;
+	shdr[2].sh_offset = data_seg.offset + data_seg.len;
+	shdr[2].sh_size = sizeof(shstrtab);
+	shdr[2].sh_link = 0;
+	shdr[2].sh_info = 0;
+	shdr[2].sh_addralign = 1;
+	shdr[2].sh_entsize = 0;
+
+	/* .dynstr */
+	shdr[3].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".dynstr\0", 8) - shstrtab;
+	shdr[3].sh_type = SHT_STRTAB;
+	shdr[3].sh_flags = SHF_ALLOC;
+	shdr[3].sh_addr = dynstr.shdr.sh_addr;
+	shdr[3].sh_offset = dynstr.shdr.sh_offset;
+	shdr[3].sh_size = dynstr.shdr.sh_size;
+	shdr[3].sh_link = 0;
+	shdr[3].sh_info = 0;
+	shdr[3].sh_addralign = 1;
+	shdr[3].sh_entsize = 0;
+
+	/* .dynamic */
+	shdr[4].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".dynamic\0", 9) - shstrtab;
+	shdr[4].sh_type = SHT_DYNAMIC;
+	shdr[4].sh_flags = SHF_ALLOC | SHF_WRITE; /* x86 specific */
+	shdr[4].sh_addr = dynamic_seg.base;
+	shdr[4].sh_offset = dynamic_seg.offset;
+	shdr[4].sh_size = dynamic_seg.len;
+	shdr[4].sh_link = 3; /* link to .dynstr */
+	shdr[4].sh_info = 0;
+	shdr[4].sh_addralign = 8;
+	shdr[4].sh_entsize = sizeof(Elf64_Dyn);
+
+	/* .init_array */
+	shdr[5].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".init_array\0", 9) - shstrtab;
+	shdr[5].sh_type = SHT_INIT_ARRAY;
+	shdr[5].sh_flags = SHF_ALLOC | SHF_WRITE;
+	shdr[5].sh_addr = init_array.shdr.sh_addr;
+	shdr[5].sh_offset = init_array.shdr.sh_offset;
+	shdr[5].sh_size = init_array.shdr.sh_size;
+	shdr[5].sh_link = 0;
+	shdr[5].sh_info = 0;
+	shdr[5].sh_addralign = 8;
+	shdr[5].sh_entsize = 8;
+
+	/* .fini_array */
+	shdr[6].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".fini_array\0", 9) - shstrtab;
+	shdr[6].sh_type = SHT_FINI_ARRAY;
+	shdr[6].sh_flags = SHF_ALLOC | SHF_WRITE;
+	shdr[6].sh_addr = fini_array.shdr.sh_addr;
+	shdr[6].sh_offset = fini_array.shdr.sh_offset;
+	shdr[6].sh_size = fini_array.shdr.sh_size;
+	shdr[6].sh_link = 0;
+	shdr[6].sh_info = 0;
+	shdr[6].sh_addralign = 8;
+	shdr[6].sh_entsize = 8;
+
+	/* .rela.plt */
+	shdr[7].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".rela.plt\0", 10) - shstrtab;
+	shdr[7].sh_type = SHT_RELA;
+	shdr[7].sh_flags = SHF_ALLOC | SHF_INFO_LINK;
+	shdr[7].sh_addr = pltrel.shdr.sh_addr;
+	shdr[7].sh_offset = pltrel.shdr.sh_offset;
+	shdr[7].sh_size = pltrel.shdr.sh_size;
+	shdr[7].sh_link = 9; /* link to .dynsym */
+	shdr[7].sh_info = 0;
+	shdr[7].sh_addralign = 8;
+	shdr[7].sh_entsize = pltrel.shdr.sh_entsize;
+
+	/* .rela.dyn */
+	shdr[8].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".rela.dyn\0", 10) - shstrtab;
+	shdr[8].sh_type = SHT_RELA;
+	shdr[8].sh_flags = SHF_ALLOC;
+	shdr[8].sh_addr = reladyn.shdr.sh_addr;
+	shdr[8].sh_offset = reladyn.shdr.sh_offset;
+	shdr[8].sh_size = reladyn.shdr.sh_size;
+	shdr[8].sh_link = 9; /* link to .dynsym */
+	shdr[8].sh_info = 0;
+	shdr[8].sh_addralign = 8;
+	shdr[8].sh_entsize = reladyn.shdr.sh_entsize;
+
+	/* .dynsym */
+	shdr[9].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".dynsym\0", 8) - shstrtab;
+	shdr[9].sh_type = SHT_DYNSYM;
+	shdr[9].sh_flags = SHF_ALLOC;
+	shdr[9].sh_addr = dynsym.shdr.sh_addr;
+	shdr[9].sh_offset = dynsym.shdr.sh_offset;
+	shdr[9].sh_size = 0; /* FIXME */
+	shdr[9].sh_link = 3; /* link to .dynstr */
+	shdr[9].sh_info = 0;
+	shdr[9].sh_addralign = 8;
+	shdr[9].sh_entsize = dynsym.shdr.sh_entsize;
+
+	/* .got.plt */
+	shdr[10].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".got.plt\0", 9) - shstrtab;
+	shdr[10].sh_type = SHT_PROGBITS;
+	shdr[10].sh_flags = SHF_ALLOC | SHF_WRITE;
+	shdr[10].sh_addr = gotplt.shdr.sh_addr;
+	shdr[10].sh_offset = gotplt.shdr.sh_offset; /* FIXME incorrect value */
+	shdr[10].sh_size = sizeof(uint64_t) * 3 + (pltrel.shdr.sh_size / sizeof(Elf64_Rela)) * sizeof(uint64_t); /* x86-64 specific */
+	shdr[10].sh_link = 0;
+	shdr[10].sh_info = 0;
+	shdr[10].sh_addralign = 8;
+	shdr[10].sh_entsize = 8;
+
+	/* .plt */
+	shdr[11].sh_name = (uint8_t *)memmem(shstrtab, sizeof(shstrtab), ".plt\0", 5) - shstrtab;
+	shdr[11].sh_type = SHT_PROGBITS;
+	shdr[11].sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+	shdr[11].sh_addr = plt.shdr.sh_addr;
+	shdr[11].sh_offset = plt.shdr.sh_offset;
+	shdr[11].sh_size = 0x10 + (pltrel.shdr.sh_size / sizeof(Elf64_Rela)) * 0x10;
+	shdr[11].sh_link = 0;
+	shdr[11].sh_info = 0;
+	shdr[11].sh_addralign = 16;
+	shdr[11].sh_entsize = 0x10;
+
+	/* TODO .text, .data */
+
+	ehdr->e_shnum = sizeof(shdr) / sizeof(Elf64_Shdr);
+	ehdr->e_shstrndx = 2;
+
 	/* text segment */
 	printf("[+] Writing text segment at 0x%x\n", 0);
 	fwrite(text_seg.buf, 1, text_seg.len, f);
@@ -337,10 +540,14 @@ int main(int argc, char **argv)
 	fseek(f, data_seg.offset, SEEK_SET);
 	fwrite(data_seg.buf, 1, data_seg.len, f);
 
-	/* dynamic segment */
-	printf("[+] Writing dynamic segment at 0x%x\n", dynamic_seg.offset);
-	fseek(f, dynamic_seg.offset, SEEK_SET);
-	fwrite(dynamic_seg.buf, 1, dynamic_seg.len, f);
+	/* shstrtab */
+	printf("[+] Writing shstrtab at 0x%x\n", data_seg.offset + data_seg.len);
+	fwrite(shstrtab, 1, sizeof(shstrtab), f);
+
+	/* section header table */
+	printf("[+] Writing section header table at 0x%x\n", ehdr->e_shoff);
+	fseek(f, ehdr->e_shoff, SEEK_SET);
+	fwrite(shdr, 1, sizeof(shdr), f);
 
 	fclose(f);
 }
